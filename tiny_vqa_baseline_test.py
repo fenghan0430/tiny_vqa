@@ -224,57 +224,13 @@ dataset, num_answers = preprocess_data(images, questions, answers)
 def process_data(image, question, answer):
     """用于解包元组并提供图像和问题"""
     return (image, question), answer
-# def process_data(image, question, answer):
-#     """用于解包元组并提供图像和问题"""
-#     return {'input_1': image, 'input_3': question}, answer
 # 应用处理函数到数据集
 dataset = dataset.map(process_data)
 # 批量化数据集
 dataset = dataset.batch(32)
 
-# for _1 , _2 in dataset.take(1):  # 只取一个批次进行检查
-#     images = _1['input_1']
-#     questions = _1['input_3']
-#     answers = _2
-
-#     print("Batch shape:")
-#     print("Images shape:", images.shape)
-#     print("Questions shape:", questions.shape)
-#     print("Answers shape:", answers.shape)
-#     break  # 只查看第一个批次的形状
-
 # 训练基准VQA模型
 baseline_model = baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v)
-# baseline_model = baseline_vqa_model(vocab_size, 41, dim_k, dim_v)
-
-
-# baseline_model.summary()
-# os.exit()
 baseline_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-
-# for batch in dataset:
-#     inputs, targets = batch
 baseline_model.fit(dataset, epochs=10)
-
-# os.exit()
-
-# 第一个输入：图像数据
-# input1 = np.random.rand(32, 224, 224, 3)
-
-# 第二个输入：特征数据
-# input2 = np.random.rand(32, 1024)
-
-# 输出或标签（假设为多分类问题，每个类别的标签是one-hot编码）
-# output = np.random.randint(2, size=(32, 41))
-
-# print("第一个输入的形状：", input1.shape)
-# print("第二个输入的形状：", input2.shape)
-# print("输出的形状：", output.shape)
-
-# output1 = baseline_model.predict([input1, input2])
-# print("预测输出：", output1.shape)
-
-# for i in range(len(output1)):
-#     print(type(output1[i]))
-#     print(output1[i].shape)
     
