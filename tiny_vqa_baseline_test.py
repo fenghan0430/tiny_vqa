@@ -15,15 +15,16 @@ import numpy as np
 import threading
 import multiprocessing
 
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        # 为每个GPU设置显存增长
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        # 显存增长必须在GPU首次使用前设置，如果之后设置会抛出错误
-        print("Error setting memory growth: ", e)
+def set_gpu_memory_mode():
+    """设置gpu不占满显存"""
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print("Error setting memory growth: ", e)
+set_gpu_memory_mode()
 
 class load_floodnet():
     def __init__(self):
@@ -181,7 +182,7 @@ def baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v):
     return model
 
 # 紧凑的TinyVQA模型
-def tiny_vqa_model(vocab_size, num_answers):
+def compact_vqa_model(vocab_size, num_answers):
     '''紧凑的TinyVQA模型'''
     # 图像输入
     image_input = Input(shape=(224, 224, 3))
@@ -224,7 +225,6 @@ def kd_loss(y_true, y_pred, temp=1.0):
 
 # 示例用法
 vocab_size = 10000
-# num_answers = 100
 dim_k = 1024
 dim_v = 1024
 max_seq_length = 20
@@ -247,25 +247,10 @@ dataset = dataset.batch(batch_size)
 baseline_model = baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v)
 baseline_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 baseline_model.summary()
-baseline_model.fit(dataset, epochs=10)
+baseline_model.fit(dataset, epochs=100)
 del dataset
 current_time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 weights_save_path = f"baseline-{current_time}.h5"
 baseline_model.save_weights(weights_save_path)
 print(f"Weights saved to {weights_save_path}")
-
-# soft_labels = baseline_model.predict([image_data, question_data])
-# def process_data_for_tiny(image, question, soft_label):
-#     return (image, question), soft_label
-# dataset_for_tiny = tf.data.Dataset.from_tensor_slices((image_data, question_data, soft_labels))
-# dataset_for_tiny = dataset_for_tiny.map(process_data_for_tiny)
-# dataset_for_tiny = dataset_for_tiny.batch(batch_size)
-
-# for batch in dataset_for_tiny:
-#     images, questions, labels = batch
-#     print(images.shape, questions.shape, labels.shape)
-#     break
-
-# tiny_model = tiny_vqa_model(vocab_size, num_answers)
-# tiny_model.compile(optimizer='adam', loss=kd_loss, metrics=['accuracy'])
-# tiny_model.fit(dataset_for_tiny, epochs=10)    
+    

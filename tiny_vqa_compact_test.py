@@ -241,7 +241,8 @@ dataset_for_compact = dataset_for_compact.map(process_data_for_compact)
 dataset_for_compact = dataset_for_compact.batch(batch_size)
 
 for batch in dataset_for_compact:
-    images, questions, labels = batch
+    images_questions, labels = batch
+    images, questions = images_questions
     print(images.shape, questions.shape, labels.shape)
     break
 
