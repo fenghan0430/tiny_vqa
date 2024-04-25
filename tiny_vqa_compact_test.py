@@ -1,7 +1,7 @@
 import tensorflow as tf
 from keras.applications import VGG16
 from keras.api._v2.keras.layers import Input, LSTM, Dense, Conv2D, DepthwiseConv2D, MaxPooling2D, Flatten, Multiply, Lambda, Softmax, Dropout, Embedding, Flatten
-from keras.api._v2.keras.models import Model
+from keras.api._v2.keras.models import Model, load_model
 from keras.api._v2.keras.losses import KLDivergence
 from keras.api._v2.keras.preprocessing.image import ImageDataGenerator
 from keras.api._v2.keras.preprocessing.text import Tokenizer
@@ -15,15 +15,16 @@ import numpy as np
 import threading
 import multiprocessing
 
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        # 为每个GPU设置显存增长
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        # 显存增长必须在GPU首次使用前设置，如果之后设置会抛出错误
-        print("Error setting memory growth: ", e)
+def set_gpu_memory_mode():
+    """设置gpu不占满显存"""
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print("Error setting memory growth: ", e)
+set_gpu_memory_mode()
 
 class load_floodnet():
     def __init__(self):
@@ -123,7 +124,6 @@ def preprocess_data(images, questions, answers, num_answers=None):
     # return tf.data.Dataset.from_tensor_slices((image_data, question_data, answer_data)), len(label_map)
     return image_data, question_data, answer_data, len(label_map)
 
-# MFB融合块
 def mfb_fusion(image_features, question_features, dim_k, dim_v):
     '''MFB融合块'''
     
@@ -142,7 +142,6 @@ def mfb_fusion(image_features, question_features, dim_k, dim_v):
     fused = Lambda(lambda x: tf.nn.l2_normalize(x, dim=1))(fused)
     return fused
 
-# 基准VQA模型
 def baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v):
     '''基准VQA模型'''
     # 图像输入
@@ -180,8 +179,7 @@ def baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v):
     model = Model(inputs=[image_input, question_input], outputs=output)
     return model
 
-# 紧凑的TinyVQA模型
-def tiny_vqa_model(vocab_size, num_answers):
+def compact_vqa_model(vocab_size, num_answers):
     '''紧凑的TinyVQA模型'''
     # 图像输入
     image_input = Input(shape=(224, 224, 3))
@@ -208,7 +206,6 @@ def tiny_vqa_model(vocab_size, num_answers):
     model = Model(inputs=[image_input, question_input], outputs=output)
     return model
 
-# 知识蒸馏损失
 def kd_loss(y_true, y_pred, temp=1.0):
     '''知识蒸馏损失'''
     y_true = tf.cast(y_true, tf.float32)
@@ -224,7 +221,6 @@ def kd_loss(y_true, y_pred, temp=1.0):
 
 # 示例用法
 vocab_size = 10000
-# num_answers = 100
 dim_k = 1024
 dim_v = 1024
 max_seq_length = 20
@@ -233,39 +229,26 @@ batch_size = 64
 temp = load_floodnet()
 images, questions, answers = temp.load_data()
 image_data, question_data, answer_data, num_answers = preprocess_data(images, questions, answers)
-dataset = tf.data.Dataset.from_tensor_slices((image_data, question_data, answer_data))
-def process_data(image, question, answer):
-    """用于解包元组并提供图像和问题"""
-    return (image, question), answer
-    # return {"input_1":image, "input_3":question}, answer
-# 应用处理函数到数据集
-dataset = dataset.map(process_data)
-# 批量化数据集
-dataset = dataset.batch(batch_size)
 
-# 训练基准VQA模型
 baseline_model = baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v)
-baseline_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-baseline_model.summary()
-baseline_model.fit(dataset, epochs=10)
-del dataset
+baseline_model.load_weights('baseline-2024-04-25-03-32-29.h5')
+
+soft_labels = baseline_model.predict([image_data, question_data])
+def process_data_for_compact(image, question, soft_label):
+    return (image, question), soft_label
+dataset_for_compact = tf.data.Dataset.from_tensor_slices((image_data, question_data, soft_labels))
+dataset_for_compact = dataset_for_compact.map(process_data_for_compact)
+dataset_for_compact = dataset_for_compact.batch(batch_size)
+
+for batch in dataset_for_compact:
+    images, questions, labels = batch
+    print(images.shape, questions.shape, labels.shape)
+    break
+
+compact_model = compact_vqa_model(vocab_size, num_answers)
+compact_model.compile(optimizer='adam', loss=kd_loss, metrics=['accuracy'])
+compact_model.fit(dataset_for_compact, epochs=10)
 current_time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-weights_save_path = f"baseline-{current_time}.h5"
-baseline_model.save_weights(weights_save_path)
+weights_save_path = f"compact-{current_time}.h5"
+compact_model.save_weights(weights_save_path)
 print(f"Weights saved to {weights_save_path}")
-
-# soft_labels = baseline_model.predict([image_data, question_data])
-# def process_data_for_tiny(image, question, soft_label):
-#     return (image, question), soft_label
-# dataset_for_tiny = tf.data.Dataset.from_tensor_slices((image_data, question_data, soft_labels))
-# dataset_for_tiny = dataset_for_tiny.map(process_data_for_tiny)
-# dataset_for_tiny = dataset_for_tiny.batch(batch_size)
-
-# for batch in dataset_for_tiny:
-#     images, questions, labels = batch
-#     print(images.shape, questions.shape, labels.shape)
-#     break
-
-# tiny_model = tiny_vqa_model(vocab_size, num_answers)
-# tiny_model.compile(optimizer='adam', loss=kd_loss, metrics=['accuracy'])
-# tiny_model.fit(dataset_for_tiny, epochs=10)    
