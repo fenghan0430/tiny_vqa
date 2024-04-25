@@ -7,12 +7,24 @@ from keras.api._v2.keras.preprocessing.image import ImageDataGenerator
 from keras.api._v2.keras.preprocessing.text import Tokenizer
 from keras.api._v2.keras.preprocessing.sequence import pad_sequences
 
+import gc
+import datetime
 import cv2 
 import os
 import json
 import numpy as np
 import threading
 import multiprocessing
+
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        # 为每个GPU设置显存增长
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        # 显存增长必须在GPU首次使用前设置，如果之后设置会抛出错误
+        print("Error setting memory growth: ", e)
 
 class load_floodnet():
     def __init__(self):
@@ -109,7 +121,8 @@ def preprocess_data(images, questions, answers, num_answers=None):
 
     answer_data = tf.keras.utils.to_categorical(answers_encoded, num_classes=len(label_map))
     
-    return tf.data.Dataset.from_tensor_slices((image_data, question_data, answer_data)), len(label_map)
+    # return tf.data.Dataset.from_tensor_slices((image_data, question_data, answer_data)), len(label_map)
+    return image_data, question_data, answer_data, len(label_map)
 
 # MFB融合块
 def mfb_fusion(image_features, question_features, dim_k, dim_v):
@@ -174,11 +187,11 @@ def tiny_vqa_model(vocab_size, num_answers):
     # 图像输入
     image_input = Input(shape=(224, 224, 3))
     # 紧凑的CNN提取图像特征
-    x = Conv2D(32, 3, activation='relu')(image_input)
+    x = Conv2D(32, 3, activation='relu', padding='same')(image_input)
     x = MaxPooling2D()(x)
-    x = DepthwiseConv2D(64, 3, activation='relu')(x)
+    x = DepthwiseConv2D(64, 3, activation='relu', padding='same')(x)
     x = MaxPooling2D()(x)
-    x = DepthwiseConv2D(64, 3, activation='relu')(x)
+    x = DepthwiseConv2D(64, 3, activation='relu', padding='same')(x)
     x = MaxPooling2D()(x)
     image_features = Flatten()(x)
     
@@ -216,21 +229,43 @@ vocab_size = 10000
 dim_k = 1024
 dim_v = 1024
 max_seq_length = 20
+batch_size = 64
 
 temp = load_floodnet()
 images, questions, answers = temp.load_data()
-
-dataset, num_answers = preprocess_data(images, questions, answers)
+image_data, question_data, answer_data, num_answers = preprocess_data(images, questions, answers)
+dataset = tf.data.Dataset.from_tensor_slices((image_data, question_data, answer_data))
 def process_data(image, question, answer):
     """用于解包元组并提供图像和问题"""
     return (image, question), answer
+    # return {"input_1":image, "input_3":question}, answer
 # 应用处理函数到数据集
 dataset = dataset.map(process_data)
 # 批量化数据集
-dataset = dataset.batch(32)
+dataset = dataset.batch(batch_size)
 
 # 训练基准VQA模型
 baseline_model = baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v)
 baseline_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+baseline_model.summary()
 baseline_model.fit(dataset, epochs=10)
-    
+del dataset
+current_time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+weights_save_path = f"baseline-{current_time}.h5"
+baseline_model.save_weights(weights_save_path)
+print(f"Weights saved to {weights_save_path}")
+# soft_labels = baseline_model.predict([image_data, question_data])
+# def process_data_for_tiny(image, question, soft_label):
+#     return (image, question), soft_label
+# dataset_for_tiny = tf.data.Dataset.from_tensor_slices((image_data, question_data, soft_labels))
+# dataset_for_tiny = dataset_for_tiny.map(process_data_for_tiny)
+# dataset_for_tiny = dataset_for_tiny.batch(batch_size)
+
+# for batch in dataset_for_tiny:
+#     images, questions, labels = batch
+#     print(images.shape, questions.shape, labels.shape)
+#     break
+
+# tiny_model = tiny_vqa_model(vocab_size, num_answers)
+# tiny_model.compile(optimizer='adam', loss=kd_loss, metrics=['accuracy'])
+# tiny_model.fit(dataset_for_tiny, epochs=10)    
