@@ -45,7 +45,7 @@ def baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v):
     weighted_image_features = Multiply()([image_features, attention_weights])
     weighted_image_features = Lambda(lambda x: tf.reduce_sum(x, axis=[1, 2]))(weighted_image_features)
     
-    # 连接加权图像特征和问题特征
+    # 连接加权图像特征和问题特征 
     combined = tf.keras.layers.concatenate([weighted_image_features, question_features])
     output = Dense(num_answers, activation='softmax')(combined)
     
