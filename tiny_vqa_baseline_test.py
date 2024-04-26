@@ -1,6 +1,6 @@
 import tensorflow as tf
 from keras.applications import VGG16
-from keras.api._v2.keras.layers import Input, LSTM, Dense, Conv2D, DepthwiseConv2D, MaxPooling2D, Flatten, Multiply, Lambda, Softmax, Dropout, Embedding, Flatten
+from keras.api._v2.keras.layers import Input, LSTM, Dense, Conv2D, DepthwiseConv2D, MaxPooling2D, Flatten, Multiply, Lambda, Softmax, Dropout, Embedding, Flatten, Reshape, Conv2DTranspose
 from keras.api._v2.keras.models import Model
 from keras.api._v2.keras.losses import KLDivergence
 from keras.api._v2.keras.preprocessing.image import ImageDataGenerator
@@ -14,6 +14,7 @@ import json
 import numpy as np
 import threading
 import multiprocessing
+from load_foodnet import load_floodnet
 
 def set_gpu_memory_mode():
     """设置gpu不占满显存"""
@@ -25,74 +26,13 @@ def set_gpu_memory_mode():
         except RuntimeError as e:
             print("Error setting memory growth: ", e)
 set_gpu_memory_mode()
-
-class load_floodnet():
-    def __init__(self):
-        self.resized_images_dict = multiprocessing.Manager().dict()
-        self.lock = threading.Lock()
     
-    def get_all_filenames(self, directory):
-        """列出文件名"""
-        filenames = []
-        for root, dirs, files in os.walk(directory):
-            for file in files:
-                file_path = os.path.join(root, file)
-                filenames.append(file_path)
-        return filenames
-
-    def resize_and_store_images(self, image_paths):
-        for path in image_paths:
-            image = cv2.imread(path)
-            resized_image = cv2.resize(image, (224, 224))
-            _, file_name = os.path.split(path)
-            with self.lock:
-                self.resized_images_dict[file_name] = resized_image
-    
-    def process_images_parallel(self):
-        image_paths = self.get_all_filenames("/work/floodnet_dataset/Images/Train_Image")
-        num_cores = multiprocessing.cpu_count()
-        # num_cores = 8
-        chunk_size = len(image_paths) // num_cores
-        chunks = [image_paths[i:i+chunk_size] for i in range(0, len(image_paths), chunk_size)]
-
-        processes = []
-        for i, chunk in enumerate(chunks):
-            process = multiprocessing.Process(target=self.resize_and_store_images, args=(chunk,), name=f"Process-{i+1}")
-            processes.append(process)
-            process.start()
-
-        for process in processes:
-            process.join()
-        return self.resized_images_dict
-    
-    def load_data(self):
-        '''加载数据'''
-        self.resized_images_dict = self.process_images_parallel()
-        
-        # 从json文件中读取问题和标签, 并将标签和数据对应 
-        with open('/work/floodnet_dataset/Questions/Training Question.json', 'r') as f:
-            data = json.load(f)
-
-        image_id_question_list=[]
-
-        for key, value in data.items():
-            image_id = value["Image_ID"]
-            if image_id in self.resized_images_dict:
-                image = self.resized_images_dict[image_id]
-            else:
-                image = None
-            image_id_question_list.append([image_id, value["Question"], value["Ground_Truth"], image])
-        
-        # 返回图片，问题和答案三个列表    
-        return [item[3] for item in image_id_question_list], [item[1] for item in image_id_question_list], [item[2] for item in image_id_question_list]
-    
-def preprocess_data(images, questions, answers, num_answers=None):
+def preprocess_data(images, questions, answers, image_labels, num_answers=None):
     '''数据预处理'''
     # 图像预处理
     # image_generator = ImageDataGenerator(rescale=1./255)
     # images = np.stack(images, axis=0) # (图片数量,h,w,通道)
     # image_data = image_generator.flow(images, batch_size=len(images), shuffle=False)
-    
     images = np.stack(images, axis=0) # (图片数量,h,w,通道)
     min_value = np.min(images)
     max_value = np.max(images)
@@ -121,8 +61,20 @@ def preprocess_data(images, questions, answers, num_answers=None):
 
     answer_data = tf.keras.utils.to_categorical(answers_encoded, num_classes=len(label_map))
     
+    # 图像标签预处理
+    processed_image_labels = []    
+    for img in image_labels:
+        if len(img.shape) == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # 二值化处理
+        _, binary_image = cv2.threshold(img, 5, 255, cv2.THRESH_BINARY)        
+        # 归一化
+        normalized_image = binary_image / 255.0
+        processed_image_labels.append(normalized_image)
+    processed_image_labels = np.array(processed_image_labels)
+    
     # return tf.data.Dataset.from_tensor_slices((image_data, question_data, answer_data)), len(label_map)
-    return image_data, question_data, answer_data, len(label_map)
+    return image_data, question_data, answer_data, processed_image_labels, len(label_map)
 
 # MFB融合块
 def mfb_fusion(image_features, question_features, dim_k, dim_v):
@@ -163,6 +115,8 @@ def baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v):
     
     # 计算注意力权重
     attention_weights = Softmax()(fused)
+    # 注意力匹配损失
+    attention_weights_loss = Reshape((64, 112))(attention_weights)
     
     # 应用注意力权重
     # 将形状为 (7, 1024) 的张量扩展为 (7, 7, 1024)
@@ -177,8 +131,8 @@ def baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v):
     combined = tf.keras.layers.concatenate([weighted_image_features, question_features])
     output = Dense(num_answers, activation='softmax')(combined)
     
-    # model = Model(inputs=[image_input, question_input], outputs=[output, attention_weights])
-    model = Model(inputs=[image_input, question_input], outputs=output)
+    model = Model(inputs=[image_input, question_input], outputs=[output, attention_weights_loss])
+    # model = Model(inputs=[image_input, question_input], outputs=output)
     return model
 
 # 紧凑的TinyVQA模型
@@ -223,34 +177,36 @@ def kd_loss(y_true, y_pred, temp=1.0):
     loss = KLDivergence()(y_true, y_pred)
     return loss
 
+
 # 示例用法
 vocab_size = 10000
 dim_k = 1024
 dim_v = 1024
 max_seq_length = 20
 batch_size = 64
-
-temp = load_floodnet()
-images, questions, answers = temp.load_data()
-image_data, question_data, answer_data, num_answers = preprocess_data(images, questions, answers)
-dataset = tf.data.Dataset.from_tensor_slices((image_data, question_data, answer_data))
-def process_data(image, question, answer):
+# baseline_model = baseline_vqa_model(vocab_size, 41, dim_k, dim_v)
+# baseline_model.summary()
+temp = load_floodnet("floodnet_dataset")
+images, questions, answers, image_labels = temp.load_data()
+image_data, question_data, answer_data, image_labels_data, num_answers = preprocess_data(images, questions, answers, image_labels)
+dataset = tf.data.Dataset.from_tensor_slices((image_data, question_data, answer_data, image_labels_data))
+def process_data(image, question, answer, label):
     """用于解包元组并提供图像和问题"""
-    return (image, question), answer
+    return (image, question), (answer, label)
     # return {"input_1":image, "input_3":question}, answer
 # 应用处理函数到数据集
 dataset = dataset.map(process_data)
 # 批量化数据集
 dataset = dataset.batch(batch_size)
 
-# 训练基准VQA模型
+# # 训练基准VQA模型
 baseline_model = baseline_vqa_model(vocab_size, num_answers, dim_k, dim_v)
-baseline_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-baseline_model.summary()
-baseline_model.fit(dataset, epochs=100)
+baseline_model.compile(optimizer='adam', loss=['categorical_crossentropy', tf.keras.losses.MeanSquaredError()], metrics=['accuracy'])
+# baseline_model.summary()
+baseline_model.fit(dataset, epochs=10)
 del dataset
 current_time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-weights_save_path = f"baseline-{current_time}.h5"
+weights_save_path = f"baseline2-{current_time}.h5"
 baseline_model.save_weights(weights_save_path)
 print(f"Weights saved to {weights_save_path}")
     
