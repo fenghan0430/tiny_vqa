@@ -36,7 +36,7 @@ class load_floodnet():
             image_lab = cv2.imread(lab_path)
             image = cv2.imread(path)
             resized_image = cv2.resize(image, (224, 224))
-            resized_image_lab = cv2.resize(image_lab, (224, 224))
+            resized_image_lab = cv2.resize(image_lab, (112, 64))
             with self.lock:
                 # 不同的字典使用同一个图片名，以确保掩码和图片对应
                 # 并方便后续处理
@@ -58,30 +58,23 @@ class load_floodnet():
 
         for process in processes:
             process.join()
-
-        return self.resized_images_dict, self.resized_images_label_dict
     
     def load_data(self):
         '''
         加载数据,
         返回:图片列表,问题列表,答案列表,图像掩码列表
         '''
-        self.resized_images_dict = self.process_images_parallel()
+        self.process_images_parallel()
         
         # 从json文件中读取问题和标签, 并将标签和数据对应 
         with open(os.path.join(self.dir, "Questions", "Training Question.json"), 'r') as f:
             data = json.load(f)
-
         image_id_question_list=[]
-
         for key, value in data.items():
             image_id = value["Image_ID"]
             if image_id in self.resized_images_dict:
                 image = self.resized_images_dict[image_id]
                 image_lab = self.resized_images_label_dict[image_id]
-            else:
-                image = None
-                image_lab = None
             image_id_question_list.append([image_id, value["Question"], value["Ground_Truth"], image, image_lab])
             
         return [item[3] for item in image_id_question_list], [item[1] for item in image_id_question_list], [item[2] for item in image_id_question_list], [item[4] for item in image_id_question_list]
